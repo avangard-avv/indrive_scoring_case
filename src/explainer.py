@@ -1,8 +1,10 @@
 """
-Phase 4: Explainable AI — SHAP-based score explanations.
+Phase 4: Explainable AI — SHAP + Enrichment score breakdown.
 
-Generates human-readable explanations for each applicant's merit score,
-converting SHAP feature contributions into plain-language text.
+Generates human-readable explanations for each applicant's merit score.
+Two layers of explanation:
+1. SHAP values from CatBoost (explains the ML component)
+2. Enrichment score breakdown (explains the composite component)
 """
 
 import numpy as np
@@ -10,8 +12,6 @@ import pandas as pd
 import shap
 from catboost import CatBoostClassifier
 
-
-# Human-readable feature names for explanations
 FEATURE_LABELS = {
     "requested_amount": "Requested subsidy amount",
     "norm_amount": "Standard norm amount",
@@ -26,10 +26,18 @@ FEATURE_LABELS = {
     "credit_score": "Credit score",
     "env_compliance": "Environmental compliance",
     "active_lawsuits": "Active lawsuits",
+    "large_livestock_latest": "Large livestock count (2025)",
+    "small_livestock_latest": "Small livestock count (2025)",
+    "milk_production_latest": "Milk production (2025, tons)",
+    "livestock_large_trend": "Large livestock growth trend",
+    "livestock_small_trend": "Small livestock growth trend",
+    "milk_trend": "Milk production trend",
+    "annual_revenue": "Annual revenue (KZT)",
     "region": "Region",
     "direction": "Subsidy direction (farming type)",
     "district": "District",
     "has_tax_debt": "Tax debt status",
+    "is_bankrupt": "Bankruptcy status",
 }
 
 
@@ -39,8 +47,7 @@ def compute_shap_values(
 ) -> shap.Explanation:
     """Compute SHAP values for the given feature matrix."""
     explainer = shap.TreeExplainer(model)
-    shap_values = explainer(X)
-    return shap_values
+    return explainer(X)
 
 
 def explain_single_applicant(
@@ -49,18 +56,7 @@ def explain_single_applicant(
     feature_values: pd.Series,
     top_n: int = 5,
 ) -> list[dict]:
-    """Generate human-readable explanations for a single prediction.
-
-    Args:
-        shap_values: SHAP values array for one sample.
-        feature_names: List of feature names.
-        feature_values: Actual feature values for this sample.
-        top_n: Number of top contributing factors to include.
-
-    Returns:
-        List of dicts with 'feature', 'value', 'impact', 'direction', 'text'.
-    """
-    # Sort features by absolute SHAP value
+    """Generate human-readable explanations for a single ML prediction."""
     abs_shap = np.abs(shap_values)
     top_indices = np.argsort(abs_shap)[::-1][:top_n]
 
@@ -70,13 +66,10 @@ def explain_single_applicant(
         shap_val = float(shap_values[idx])
         fval = feature_values.iloc[idx]
         label = FEATURE_LABELS.get(fname, fname)
-
         direction = "positive" if shap_val > 0 else "negative"
-        # Scale SHAP impact to approximate point contribution (0-100 scale)
-        impact_points = abs(shap_val) * 25  # rough scaling factor
+        impact_points = abs(shap_val) * 25
 
         text = _generate_explanation_text(label, fval, direction, impact_points)
-
         explanations.append({
             "feature": fname,
             "label": label,
@@ -97,13 +90,16 @@ def _generate_explanation_text(
     impact_str = f"{impact:.0f}"
     verb = "increased" if direction == "positive" else "decreased"
 
-    # Special cases for more natural language
     if label == "Historical approval rate":
         pct = f"{float(value) * 100:.0f}%" if isinstance(value, (int, float)) else value
         return f"Score {verb} by ~{impact_str} pts: approval rate of {pct}"
 
     if label == "Tax debt status":
         status = "has tax debt" if str(value).lower() in ("true", "1", "yes") else "no tax debt"
+        return f"Score {verb} by ~{impact_str} pts: applicant {status}"
+
+    if label == "Bankruptcy status":
+        status = "is bankrupt" if str(value).lower() in ("true", "1", "yes") else "not bankrupt"
         return f"Score {verb} by ~{impact_str} pts: applicant {status}"
 
     if label == "Active lawsuits":
@@ -115,14 +111,147 @@ def _generate_explanation_text(
     if label == "Credit score":
         return f"Score {verb} by ~{impact_str} pts: credit score of {value}"
 
-    if label == "Environmental compliance":
-        return f"Score {verb} by ~{impact_str} pts: environmental compliance at {value}"
+    if label == "Large livestock count (2025)":
+        return f"Score {verb} by ~{impact_str} pts: {int(value)} large livestock (cows/horses)"
+
+    if label == "Small livestock count (2025)":
+        return f"Score {verb} by ~{impact_str} pts: {int(value)} small livestock (sheep/goats)"
+
+    if label == "Milk production (2025, tons)":
+        return f"Score {verb} by ~{impact_str} pts: {value:.1f} tons milk production"
+
+    if label == "Large livestock growth trend":
+        trend_word = "growing" if float(value) > 0 else "declining"
+        return f"Score {verb} by ~{impact_str} pts: large herd is {trend_word} ({value:+.1%})"
+
+    if label == "Small livestock growth trend":
+        trend_word = "growing" if float(value) > 0 else "declining"
+        return f"Score {verb} by ~{impact_str} pts: small herd is {trend_word} ({value:+.1%})"
+
+    if label == "Milk production trend":
+        trend_word = "increasing" if float(value) > 0 else "decreasing"
+        return f"Score {verb} by ~{impact_str} pts: milk production {trend_word} ({value:+.1%})"
+
+    if label == "Annual revenue (KZT)":
+        return f"Score {verb} by ~{impact_str} pts: annual revenue ₸{float(value):,.0f}"
 
     if label == "Number of past applications":
         return f"Score {verb} by ~{impact_str} pts: {value} previous application(s)"
 
-    # Generic fallback
     return f"Score {verb} by ~{impact_str} pts due to {label.lower()} ({value})"
+
+
+def generate_enrichment_breakdown(row: pd.Series) -> list[dict]:
+    """Generate the enrichment score breakdown for one applicant.
+
+    Shows the 6 weighted components of the enrichment score with values.
+    """
+    components = []
+
+    # Livestock growth (20%)
+    trend_avg = (
+        row.get("livestock_large_trend", 0)
+        + row.get("livestock_small_trend", 0)
+        + row.get("milk_trend", 0)
+    ) / 3
+    growth_score = ((trend_avg + 1) / 2) * 20
+    trend_word = "growing" if trend_avg > 0 else "declining" if trend_avg < 0 else "stable"
+    components.append({
+        "component": "Livestock Growth",
+        "weight": "20%",
+        "score": round(growth_score, 1),
+        "max_score": 20,
+        "text": f"Livestock herds are {trend_word} (avg trend: {trend_avg:+.3f})",
+        "direction": "positive" if growth_score >= 10 else "negative",
+    })
+
+    # Farm scale (15%)
+    # Approximate using raw values percentile (we don't have the full df here,
+    # so we give a rough absolute rating)
+    large = row.get("large_livestock_latest", 0)
+    small = row.get("small_livestock_latest", 0)
+    milk = row.get("milk_production_latest", 0)
+    # Rough heuristic: log-scale normalization
+    scale_score = min(15, (
+        np.log1p(large) / np.log1p(2000) * 0.35
+        + np.log1p(small) / np.log1p(15000) * 0.35
+        + np.log1p(milk) / np.log1p(5000) * 0.30
+    ) * 15)
+    components.append({
+        "component": "Farm Scale",
+        "weight": "15%",
+        "score": round(scale_score, 1),
+        "max_score": 15,
+        "text": f"{int(large)} large + {int(small)} small livestock, {milk:.0f}t milk",
+        "direction": "positive" if scale_score >= 7.5 else "negative",
+    })
+
+    # Financial health (25%)
+    revenue = row.get("annual_revenue", 0)
+    credit = row.get("credit_score", 650)
+    bankrupt = row.get("is_bankrupt", False)
+    tax_debt = row.get("has_tax_debt", False)
+    credit_norm = max(0, min(1, (credit - 300) / 550))
+    no_bankrupt = 0.0 if bankrupt else 1.0
+    no_tax = 0.0 if tax_debt else 1.0
+    revenue_norm = min(1.0, np.log1p(revenue) / np.log1p(500_000_000))
+    fin_score = (revenue_norm * 0.35 + credit_norm * 0.25 + no_bankrupt * 0.25 + no_tax * 0.15) * 25
+    fin_issues = []
+    if bankrupt:
+        fin_issues.append("BANKRUPT")
+    if tax_debt:
+        fin_issues.append("tax debt")
+    fin_text = f"Revenue ₸{revenue:,.0f}, credit {int(credit)}"
+    if fin_issues:
+        fin_text += f" — WARNING: {', '.join(fin_issues)}"
+    components.append({
+        "component": "Financial Health",
+        "weight": "25%",
+        "score": round(fin_score, 1),
+        "max_score": 25,
+        "text": fin_text,
+        "direction": "positive" if fin_score >= 12.5 else "negative",
+    })
+
+    # Compliance (15%)
+    ndvi = row.get("ndvi_score", 0.5)
+    env = row.get("env_compliance", 0.5)
+    comp_score = (ndvi * 0.5 + env * 0.5) * 15
+    components.append({
+        "component": "Compliance",
+        "weight": "15%",
+        "score": round(comp_score, 1),
+        "max_score": 15,
+        "text": f"NDVI: {ndvi:.3f}, environmental: {env:.3f}",
+        "direction": "positive" if comp_score >= 7.5 else "negative",
+    })
+
+    # Legal standing (10%)
+    lawsuits = row.get("active_lawsuits", 0)
+    legal_score = max(0, (1 - lawsuits / 3)) * 10
+    lawsuit_text = "clean legal record" if lawsuits == 0 else f"{int(lawsuits)} active lawsuit(s)"
+    components.append({
+        "component": "Legal Standing",
+        "weight": "10%",
+        "score": round(legal_score, 1),
+        "max_score": 10,
+        "text": lawsuit_text,
+        "direction": "positive" if lawsuits == 0 else "negative",
+    })
+
+    # Track record (15%)
+    approval = row.get("approval_rate", 0)
+    track_score = approval * 0.6 * 15 + 0.4 * 15 * 0.5  # assume median history rank
+    components.append({
+        "component": "Track Record",
+        "weight": "15%",
+        "score": round(min(15, track_score), 1),
+        "max_score": 15,
+        "text": f"Approval rate: {approval:.0%}, {int(row.get('total_applications', 0))} applications",
+        "direction": "positive" if approval >= 0.7 else "negative",
+    })
+
+    return components
 
 
 def explain_all_applicants(
@@ -132,26 +261,18 @@ def explain_all_applicants(
     feature_cols: list[str],
     cat_features: list[str],
     top_n: int = 5,
-) -> dict[str, list[dict]]:
-    """Generate explanations for all scored applicants.
-
-    Uses one representative transaction per applicant (the latest one)
-    to compute SHAP values.
+) -> dict[str, dict]:
+    """Generate full explanations (SHAP + enrichment breakdown) for all scored applicants.
 
     Returns:
-        Dict mapping bin_iin -> list of explanation dicts.
+        Dict mapping bin_iin -> {"shap": [...], "enrichment": [...]}
     """
-    merge_cols = [
-        "bin_iin", "total_applications", "total_requested", "avg_requested",
-        "approval_rate", "rejection_rate", "history_days", "unique_directions",
-        "has_tax_debt", "active_lawsuits", "ndvi_score", "credit_score",
-        "env_compliance",
-    ]
-    df = transactions.merge(
-        scored_applicants[merge_cols], on="bin_iin", how="inner"
-    )
+    from src.model import ENRICHMENT_MERGE_COLS
 
-    # Take the latest transaction per applicant as representative
+    df = transactions.merge(
+        scored_applicants[ENRICHMENT_MERGE_COLS], on="bin_iin", how="inner"
+    )
+    # Take the latest transaction per applicant
     df = df.sort_values("date_received").groupby("bin_iin").tail(1).reset_index(drop=True)
 
     X = df[feature_cols].copy()
@@ -161,22 +282,27 @@ def explain_all_applicants(
         if col not in cat_features:
             X[col] = X[col].fillna(0)
 
-    # Compute SHAP
     shap_vals = compute_shap_values(model, X)
-
-    # Handle multi-output SHAP (take class=1 for binary)
     values = shap_vals.values
     if values.ndim == 3:
         values = values[:, :, 1]
 
     explanations = {}
     for i, bin_iin in enumerate(df["bin_iin"].values):
-        explanations[bin_iin] = explain_single_applicant(
-            values[i],
-            feature_cols,
-            X.iloc[i],
-            top_n=top_n,
+        shap_exps = explain_single_applicant(
+            values[i], feature_cols, X.iloc[i], top_n=top_n,
         )
+        # Get enrichment breakdown from scored_applicants
+        applicant_row = scored_applicants[scored_applicants["bin_iin"] == bin_iin]
+        if len(applicant_row) > 0:
+            enrichment_exps = generate_enrichment_breakdown(applicant_row.iloc[0])
+        else:
+            enrichment_exps = []
+
+        explanations[bin_iin] = {
+            "shap": shap_exps,
+            "enrichment": enrichment_exps,
+        }
 
     return explanations
 
@@ -184,7 +310,10 @@ def explain_all_applicants(
 if __name__ == "__main__":
     from src.data_ingestion import load_and_process
     from src.enrichment import enrich_applicants
-    from src.model import prepare_training_data, train_model, compute_merit_scores, ALL_FEATURES, CATEGORICAL_FEATURES
+    from src.model import (
+        prepare_training_data, train_model, compute_merit_scores,
+        ALL_FEATURES, CATEGORICAL_FEATURES,
+    )
 
     print("Loading data...")
     transactions, applicants = load_and_process()
@@ -192,16 +321,23 @@ if __name__ == "__main__":
 
     print("Training model...")
     train_df = prepare_training_data(transactions, enriched)
-    model, metrics = train_model(train_df, iterations=200)
+    model, _ = train_model(train_df, iterations=300)
     scores = compute_merit_scores(model, enriched, transactions)
 
-    print("\nGenerating explanations for top 5 applicants...")
+    print("\nGenerating explanations for top 5...")
     explanations = explain_all_applicants(
         model, scores.head(50), transactions, ALL_FEATURES, CATEGORICAL_FEATURES
     )
 
     for bin_iin in list(explanations.keys())[:5]:
         score = scores.loc[scores["bin_iin"] == bin_iin, "merit_score"].values[0]
-        print(f"\n--- Applicant {bin_iin} (Score: {score}) ---")
-        for exp in explanations[bin_iin]:
-            print(f"  {exp['text']}")
+        exp = explanations[bin_iin]
+        print(f"\n{'='*60}")
+        print(f"Applicant {bin_iin} — Merit Score: {score}")
+        print(f"\n  ML Factors (SHAP):")
+        for s in exp["shap"]:
+            print(f"    {'🟢' if s['direction']=='positive' else '🔴'} {s['text']}")
+        print(f"\n  Enrichment Breakdown:")
+        for e in exp["enrichment"]:
+            icon = "🟢" if e["direction"] == "positive" else "🔴"
+            print(f"    {icon} [{e['component']}] {e['score']}/{e['max_score']} — {e['text']}")

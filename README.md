@@ -9,10 +9,10 @@ In Kazakhstan, agricultural subsidies are distributed on a "first-come, first-se
 ## How It Works
 
 1. **Data Ingestion** — Dynamically downloads 36,000+ subsidy applications from the Kazakhstan Agriculture Subsidy Registry (subsidy.plem.kz).
-2. **Enrichment** — Augments applicant profiles with simulated external data: tax debt status, judicial history, satellite-based land use (NDVI), credit scores, and environmental compliance.
-3. **ML Scoring** — CatBoost classifier predicts execution probability; output is normalized to a 0-100 Merit Score.
-4. **Explainable AI** — SHAP values are converted into human-readable explanations (e.g., "Score increased by 15 pts due to perfect tax compliance").
-5. **Dashboard** — Streamlit app for government officials with ranked lists, "Why this score?" breakdowns, and Approve/Reject buttons.
+2. **Enrichment** — Augments applicant profiles with livestock counts (cows, horses, sheep, goats — 2021-2025), milk production trends, annual revenue, bankruptcy status, tax debt, credit scores, judicial history, NDVI satellite land-use, and environmental compliance.
+3. **Composite Scoring** — 40% CatBoost ML prediction (percentile-ranked) + 60% weighted enrichment score (livestock growth, farm scale, financial health, compliance, legal standing, track record).
+4. **Explainable AI** — Two-layer explanations: SHAP values for ML factors + enrichment score component breakdown with human-readable text.
+5. **Dashboard** — Streamlit app with livestock trend charts (2021-2025), score breakdowns, bankruptcy/tax-debt impact analysis, and Approve/Reject buttons.
 
 ## Quick Start
 
@@ -91,7 +91,8 @@ indrive_scoring_case/
 
 - **Dataset:** 36,651 transactions, 13,184 unique applicants
 - **Model AUC-ROC:** 0.988
-- **Model Accuracy:** 92.8%
+- **Composite Score:** Mean ~56, Std ~14, Range 22-89 (no artificial 100s)
+- **Enrichment features:** 25 per applicant (livestock 2021-2025, revenue, bankruptcy, credit, NDVI, etc.)
 - **Data source:** Fetched dynamically at runtime (no local CSV storage)
 
 ## Data Source

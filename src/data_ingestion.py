@@ -6,10 +6,8 @@ cleans Cyrillic text, currency formatting, and datetime fields.
 """
 
 import io
-import hashlib
 
 import pandas as pd
-import numpy as np
 import requests
 
 DATA_URL = (
@@ -134,7 +132,7 @@ def extract_applicant_features(df: pd.DataFrame) -> pd.DataFrame:
     agg["approval_rate"] = agg["executed_count"] / agg["total_applications"]
     agg["rejection_rate"] = agg["rejected_count"] / agg["total_applications"]
     agg["history_days"] = (
-        agg["last_application"] - agg["first_application"]
+            agg["last_application"] - agg["first_application"]
     ).dt.days.fillna(0)
 
     return agg
